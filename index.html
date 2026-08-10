@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>🐟 声控大冒险</title>
+<style>
+  * { box-sizing: border-box; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  html, body { margin:0; height:100%; overflow:hidden; font-family:"Comic Sans MS",sans-serif; background:#e0f7fa; }
+  body { touch-action: none; }
+
+  #startScreen {
+    position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6);
+    display:flex; align-items:center; justify-content:center; z-index:1000;
+  }
+  #startCard {
+    background:#fff; padding:30px 45px; border-radius:40px; text-align:center;
+    max-width:90%; box-shadow:0 15px 30px rgba(0,0,0,0.3); border:5px solid #ffb74d;
+  }
+  #startCard h2 { font-size:36px; color:#e65100; margin:0 0 10px 0; }
+  #startCard p { font-size:20px; color:#5d4037; margin-bottom:20px; }
+  #startBtn {
+    font-size:30px; padding:14px 45px; border-radius:50px; background:#ff9800; color:#fff;
+    border:none; cursor:pointer; box-shadow:0 6px 0 #cc7a00; font-weight:bold;
+  }
+  #startBtn:active{ transform:translateY(4px); box-shadow:0 2px 0 #cc7a00; }
+
+  #game {
+    width:100vw; height:100vh; display:none; flex-direction:column;
+    align-items:center; justify-content:center;
+  }
+  #sceneTitle { font-size:30px; font-weight:bold; color:#00695c; margin-bottom:5px; }
+  #status { font-size:22px; color:#e65100; margin-bottom:5px; }
+  #debugText { font-size:18px; color:#555; margin-bottom:5px; min-height:24px; }
+
+  #sceneCanvas {
+    width:90vw; max-width:900px; height:55vh; max-height:500px;
+    background:#fff; border-radius:30px; box-shadow:0 8px 25px rgba(0,0,0,0.15);
+    display:block; margin:0 auto;
+  }
+
+  #hint {
+    margin-top:10px; font-size:22px; color:#2e7d32; background:rgba(255,255,255,0.8);
+    padding:6px 16px; border-radius:20px;
+  }
+</style>
+</head>
+<body>
+
+<div id="startScreen">
+  <div id="startCard">
+    <h2>🐟 Скажи и поезжай!</h2>
+    <p>喊一声走一步，再喊再走！</p>
+    <button id="startBtn">Начать ▶</button>
+  </div>
+</div>
+
+<div id="game">
+  <div id="sceneTitle"></div>
+  <div id="status"></div>
+  <div id="debugText">🎤 请大声说出关键词</div>
+  <canvas id="sceneCanvas" width="900" height="500"></canvas>
+  <div id="hint">🎤 喊一声走一步</div>
+</div>
+
+<script>
+(function(){
+  // ===== DOM =====
+  var startScreen = document.getElementById('startScreen');
+  var gameEl = document.getElementById('game');
+  var startBtn = document.getElementById('startBtn');
+  var canvas = document.getElementById('sceneCanvas');
+  var ctx = canvas.getContext('2d');
+  var title = document.getElementById('sceneTitle');
+  var status = document.getElementById('status');
+  var debugText = document.getElementById('debugText');
+  var hint = document.getElementById('hint');
+
+  // ===== 音频 =====
+  var audioCtx = null;
+  function initAudio(){
+    if(!audioCtx){
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if(AC) audioCtx = new AC();
+    }
+    if(audioCtx && audioCtx.state==='suspended') audioCtx.resume();
+  }
+  function tone(f, dur){
+    if(!audioCtx) return;
+    var o = audioCtx.createOscillator();
+    var g = audioCtx.createGain();
+    o.type='sine'; o.frequency.value=f;
+    g.gain.setValueAtTime(0.15, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime+dur);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime+dur);
+  }
+  function winSound(){
+    [523,659,784,1046].forEach(function(f,i){ setTimeout(function(){tone(f,0.3); }, i*150); });
+  }
+  function moveSound(){ tone(300,0.06); }
+
+  // ===== 场景 =====
+  var maxX = 820;
+  var maxY = 380;
+  var scenes = [
+    { name:'🐟 鱼儿游泳', word:'游', words:['游','有','又','由','邮','油','尤','幽','右','要'], hint:'喊一声“游”，鱼儿向前游！', step:60 },
+    { name:'🐦 鸟儿飞翔', word:'飞', words:['飞','非','肥','啡','绯','妃','蜚','费'], hint:'喊一声“飞”，鸟儿向前飞！', step:60 },
+    { name:'🐯 老虎奔跑', word:'跑', words:['跑','抛','炮','袍','刨','饱','抱','包','到'], hint:'喊一声“跑”，老虎向前跑！', step:60 }
+  ];
+
+  var started = false;
+  var gameRunning = false;
+  var currentScene = 0;
+  var scene = null;
+  var x = 0;
+  var y = 250;
+  var stepTriggered = false;
+
+  // ===== 语音识别（与成功版本完全一致） =====
+  var recognition = null;
+
+  function matchText(text, words) {
+    if(!text) return false;
+    for (var i=0;i<words.length;i++) {
+      if (text.indexOf(words[i]) !== -1) return true;
+    }
+    return false;
+  }
+
+  function initSpeech(){
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(!SR) return false;
+    recognition = new SR();
+    recognition.lang = 'zh-CN';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = function(event){
+      var interim = '', final = '';
+      for (var i = event.resultIndex; i < event.results.length; ++i) {
+        var text = event.results[i][0].transcript;
+        if (event.results[i].isFinal) final += text;
+        else interim += text;
+      }
+      var combined = (final || interim).trim();
+      if(combined !== ''){
+        debugText.textContent = '识别到: ' + combined;
+        if(scene && matchText(combined, scene.words)){
+          if(!stepTriggered){
+            stepTriggered = true;
+            moveStep();
+          }
+        }
+      }
+    };
+
+    recognition.onend = function(){
+      if(gameRunning){
+        try{ recognition.start(); }catch(e){}
+      }
+    };
+    recognition.onerror = function(e){
+      if(e.error !== 'aborted' && gameRunning){
+        try{ recognition.start(); }catch(err){}
+      }
+    };
+
+    return true;
+  }
+
+  function startSpeech(){
+    if(recognition){
+      try{ recognition.start(); }catch(e){}
+    }
+  }
+
+  function stopSpeech(){
+    if(recognition){
+      try{ recognition.stop(); }catch(e){}
+    }
+  }
+
+  // ===== 移动 =====
+  function moveStep(){
+    if(!gameRunning || !scene) return;
+    moveSound();
+    x += scene.step;
+    if(x > maxX) x = maxX;
+    drawScene();
+
+    if(x >= maxX){
+      setTimeout(function(){
+        setupScene();
+        if(currentScene >= scenes.length){ endGame(); }
+      }, 300);
+      return;
+    }
+    setTimeout(function(){ stepTriggered = false; }, 200);
+  }
+
+  // ===== 场景切换 =====
+  function setupScene(){
+    currentScene++;
+    if(currentScene >= scenes.length){ endGame(); return; }
+    scene = scenes[currentScene];
+    stepTriggered = false;
+    title.textContent = scene.name;
+    hint.textContent = scene.hint;
+    x = 0;
+    y = 250;
+    status.textContent = scene.name;
+    debugText.textContent = '🎤 请喊“' + scene.word + '”';
+    drawScene();
+  }
+
+  function endGame(){
+    gameRunning = false;
+    stopSpeech();
+    winSound();
+    ctx.fillStyle = '#fff'; ctx.fillRect(0,0,900,500);
+    ctx.fillStyle = '#e65100'; ctx.font = '40px sans-serif'; ctx.fillText('🎉 到达终点！', 300, 250);
+    ctx.font = '24px sans-serif'; ctx.fillText('Молодец! Спасибо, до свидания!', 220, 320);
+    startBtn.textContent = 'Повторить ▶';
+    started = false;
+  }
+
+  // ===== 绘制 =====
+  function drawScene(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    if(currentScene === 0){
+      // 大海
+      ctx.fillStyle = '#1e88e5'; ctx.fillRect(0,0,900,500);
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      for(var i=0;i<5;i++){
+        ctx.beginPath();
+        ctx.moveTo(i*200, 300 + (i%2)*40);
+        ctx.quadraticCurveTo(i*200+50, 270+(i%2)*30, i*200+100, 300+(i%2)*40);
+        ctx.quadraticCurveTo(i*200+150, 330+(i%2)*30, i*200+200, 300+(i%2)*40);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#ffb300'; ctx.fillRect(maxX, 220, 10, 80);
+      ctx.fillStyle = '#f44336';
+      ctx.beginPath(); ctx.moveTo(maxX+10,220); ctx.lineTo(maxX+50,240); ctx.lineTo(maxX+10,260); ctx.closePath(); ctx.fill();
+      drawFish(x,280);
+    }
+    else if(currentScene === 1){
+      // 天空
+      ctx.fillStyle = '#87ceeb'; ctx.fillRect(0,0,900,500);
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.beginPath(); ctx.arc(150,120,30,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(700,180,25,0,Math.PI*2); ctx.fill();
+      for(i=0;i<3;i++){
+        ctx.beginPath();
+        ctx.arc(200+i*250, 80+i*30, 25, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#ffb300'; ctx.fillRect(maxX, 180, 8, 80);
+      ctx.fillStyle = '#f44336';
+      ctx.beginPath(); ctx.moveTo(maxX+8,180); ctx.lineTo(maxX+50,200); ctx.lineTo(maxX+8,220); ctx.closePath(); ctx.fill();
+      drawBird(x,y);
+    }
+    else if(currentScene === 2){
+      // 草原
+      ctx.fillStyle = '#87ceeb'; ctx.fillRect(0,0,900,200);
+      ctx.fillStyle = '#ffd54f'; ctx.beginPath(); ctx.arc(780,50,35,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#4caf50'; ctx.fillRect(0,200,900,300);
+      ctx.fillStyle = '#81c784';
+      for(var g=0;g<15;g++){
+        ctx.beginPath();
+        ctx.moveTo(20+g*60, 250+ (g%3)*40);
+        ctx.quadraticCurveTo(50+g*60, 210+(g%3)*30, 80+g*60, 250+(g%3)*40);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#2e7d32';
+      for(var h=0;h<10;h++){
+        ctx.beginPath();
+        ctx.moveTo(30+h*90, 300+(h%2)*30);
+        ctx.quadraticCurveTo(50+h*90, 270+(h%2)*20, 70+h*90, 300+(h%2)*30);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#ffb300'; ctx.fillRect(maxX, 220, 10, 90);
+      ctx.fillStyle = '#f44336';
+      ctx.beginPath(); ctx.moveTo(maxX+10,220); ctx.lineTo(maxX+60,245); ctx.lineTo(maxX+10,270); ctx.closePath(); ctx.fill();
+      drawTiger(x,260);
+    }
+
+    var progress = Math.min(1, x / maxX);
+    ctx.fillStyle = '#4db6ac'; ctx.fillRect(20,20, 800 * progress, 12);
+  }
+
+  function drawFish(x, y){
+    ctx.fillStyle = '#ff7043';
+    ctx.beginPath(); ctx.ellipse(x+20, y, 25, 14, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x+5, y); ctx.lineTo(x-15, y-15); ctx.lineTo(x-15, y+15); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x+28, y-4, 5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#333'; ctx.beginPath(); ctx.arc(x+29, y-4, 2.5, 0, Math.PI*2); ctx.fill();
+  }
+
+  function drawBird(x, y){
+    ctx.fillStyle = '#5d4037';
+    ctx.beginPath(); ctx.ellipse(x, y, 20, 14, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+18, y-8, 8, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fdd835'; ctx.beginPath(); ctx.moveTo(x+26,y-10); ctx.lineTo(x+32,y-8); ctx.lineTo(x+26,y-6); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#4e342e'; ctx.beginPath(); ctx.moveTo(x+5, y-8); ctx.lineTo(x-25, y-20); ctx.lineTo(x-10, y+5); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x+20,y-9,3,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#333'; ctx.beginPath(); ctx.arc(x+21,y-9,1.5,0,Math.PI*2); ctx.fill();
+  }
+
+  function drawTiger(x, y){
+    ctx.fillStyle = '#ff9800';
+    ctx.beginPath(); ctx.ellipse(x+30, y, 40, 22, 0, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#4e342e';
+    ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(x+8, y-15); ctx.lineTo(x+25, y-18); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+20, y-20); ctx.lineTo(x+40, y-20); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+35, y-16); ctx.lineTo(x+55, y-12); ctx.stroke();
+    ctx.fillStyle = '#ff9800';
+    ctx.beginPath(); ctx.ellipse(x+15, y+25, 8, 12, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+50, y+25, 8, 12, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#ffe0b2';
+    ctx.beginPath(); ctx.ellipse(x+15, y+35, 6, 4, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+50, y+35, 6, 4, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#ff9800';
+    ctx.beginPath(); ctx.ellipse(x-5, y+18, 8, 12, 0.3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+70, y+20, 8, 12, -0.3, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#ffe0b2';
+    ctx.beginPath(); ctx.ellipse(x-10, y+28, 6, 4, 0.3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+72, y+30, 6, 4, -0.3, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#ff9800';
+    ctx.beginPath();
+    ctx.moveTo(x-8, y-5);
+    ctx.quadraticCurveTo(x-35, y-15, x-50, y-35);
+    ctx.quadraticCurveTo(x-65, y-50, x-55, y-20);
+    ctx.quadraticCurveTo(x-25, y-5, x-8, y+3);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#4e342e';
+    ctx.beginPath(); ctx.arc(x-55, y-42, 5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#ffb300';
+    ctx.beginPath(); ctx.arc(x+80, y-8, 15, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#ff9800';
+    ctx.beginPath(); ctx.arc(x+72, y-20, 6, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+88, y-20, 6, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#ffcc80';
+    ctx.beginPath(); ctx.arc(x+72, y-20, 3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+88, y-20, 3, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#4e342e'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x+80, y-15); ctx.lineTo(x+80, y-8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+75, y-13); ctx.lineTo(x+85, y-10); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(x+76, y-10, 3.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+84, y-10, 3.5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#333';
+    ctx.beginPath(); ctx.arc(x+76, y-10, 1.8, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+84, y-10, 1.8, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#4e342e';
+    ctx.beginPath(); ctx.arc(x+80, y-4, 2.5, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#4e342e'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(x+80, y-1); ctx.lineTo(x+90, y+2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+80, y-1); ctx.lineTo(x+70, y+2); ctx.stroke();
+  }
+
+  // ===== 开始 =====
+  function startGame(){
+    if(started) return;
+    started = true;
+    initAudio();
+
+    // 先显示游戏画面
+    startScreen.style.display = 'none';
+    gameEl.style.display = 'flex';
+
+    // 再设置场景
+    gameRunning = true;
+    currentScene = -1;
+    setupScene();
+
+    // 再初始化语音并请求麦克风
+    var ok = initSpeech();
+    if(ok){
+      debugText.textContent = '请稍候...';
+      setTimeout(function(){
+        startSpeech();
+      }, 300);
+    } else {
+      debugText.textContent = '语音不可用';
+    }
+  }
+
+  startBtn.addEventListener('click', startGame);
+})();
+</script>
+</body>
+</html>
